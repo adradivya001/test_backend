@@ -1,0 +1,404 @@
+import { Controller, Post, Body, OnModuleInit, Get, Patch, Param } from '@nestjs/common';
+import { WorkflowsService } from './workflows.service';
+import { getTenantId } from '../common/tenant/tenant.context';
+import { AppointmentWorkflowDto } from './dto/appointment-workflow.dto';
+import { DoctorAvailabilityWorkflowDto } from './dto/doctor-availability-workflow.dto';
+import { ReportStatusWorkflowDto } from './dto/report-status-workflow.dto';
+import { KnowledgeWorkflowDto } from './dto/knowledge-workflow.dto';
+import { EscalationWorkflowDto } from './dto/escalation-workflow.dto';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { PrismaService } from '../prisma/prisma.service';
+import { Language } from '@prisma/client';
+
+@ApiTags('WhatsApp Workflows')
+@Controller('api/workflows')
+export class WorkflowsController implements OnModuleInit {
+  constructor(
+    private readonly workflowsService: WorkflowsService,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  async onModuleInit() {
+    try {
+      // 1. Ensure Sandbox Hospital exists
+      let hospital = await this.prisma.hospital.findFirst({ where: { name: 'Sandbox Hospital' } });
+      if (!hospital) {
+        hospital = await this.prisma.hospital.create({
+          data: {
+            id: 'sandbox-hospital-uuid',
+            name: 'Sandbox Hospital',
+          }
+        });
+      }
+
+      // 2. Ensure WhatsAppChannel exists for the simulator
+      const channel = await this.prisma.whatsAppChannel.findUnique({ where: { phoneNumberId: 'mock_phone_number_id' } });
+      if (!channel) {
+        await this.prisma.whatsAppChannel.create({
+          data: {
+            tenantId: hospital.id,
+            phoneNumberId: 'mock_phone_number_id',
+            phoneNumber: '1234567890',
+            accessToken: 'mock_access_token',
+            verifyToken: 'dfo_verify_token_123',
+          }
+        });
+      }
+
+      // 3. Ensure a default Hindi template exists for E2E testing
+      const apptConfirmTemplate = await this.prisma.notificationTemplate.findUnique({
+        where: {
+          hospitalId_eventType_language: {
+            hospitalId: hospital.id,
+            eventType: 'APPOINTMENT_CONFIRMATION',
+            language: 'hi',
+          }
+        }
+      });
+      if (!apptConfirmTemplate) {
+        await this.prisma.notificationTemplate.create({
+          data: {
+            hospitalId: hospital.id,
+            eventType: 'APPOINTMENT_CONFIRMATION',
+            language: 'hi',
+            content: '🏥 *अपॉइंटमेंट पक्का हो गया!*\n\nप्रिय {{patientName}}, आपका अपॉइंटमेंट {{doctorName}} के साथ {{date}} को {{time}} बजे पक्का हो गया है।',
+          }
+        });
+      }
+
+      const deptCount = await this.prisma.department.count();
+      if (deptCount === 0) {
+        console.log('Seeding default sandbox data for tests...');
+        const cardiology = await this.prisma.department.create({
+          data: {
+            name: 'Cardiology',
+            description: 'Heart care services',
+            hospitalId: hospital.id,
+          },
+        });
+
+        const doctorUser = await this.prisma.user.create({
+          data: {
+            email: 'dr.kumar@hospital.com',
+            passwordHash: 'mock-hash-123',
+            firstName: 'Kumar',
+            lastName: 'Dr',
+            role: 'DOCTOR',
+            hospitalId: hospital.id,
+          },
+        });
+
+        const doctor = await this.prisma.doctor.create({
+          data: {
+            name: 'Dr. Kumar',
+            specialization: 'Cardiologist',
+            departmentId: cardiology.id,
+            experience: 10,
+            consultationFee: 150,
+            userId: doctorUser.id,
+            status: 'ACTIVE',
+            hospitalId: hospital.id,
+          },
+        });
+
+        // Seed schedule for all 7 days of the week
+        for (let day = 0; day < 7; day++) {
+          await this.prisma.doctorSchedule.create({
+            data: {
+              doctorId: doctor.doctorId,
+              dayOfWeek: day,
+              startTime: '09:00',
+              endTime: '17:00',
+            },
+          });
+        }
+        console.log('Sandbox data seeded successfully!');
+      } else {
+        // Backfill existing records if they don't have hospitalId assigned
+        await this.prisma.department.updateMany({
+          where: { hospitalId: null },
+          data: { hospitalId: hospital.id }
+        });
+        await this.prisma.doctor.updateMany({
+          where: { hospitalId: null },
+          data: { hospitalId: hospital.id }
+        });
+        await this.prisma.user.updateMany({
+          where: { hospitalId: null },
+          data: { hospitalId: hospital.id }
+        });
+        await this.prisma.patient.updateMany({
+          where: { hospitalId: null },
+          data: { hospitalId: hospital.id }
+        });
+        await this.prisma.appointment.updateMany({
+          where: { hospitalId: null },
+          data: { hospitalId: hospital.id }
+        });
+      }
+    } catch (err) {
+      console.warn('Auto-seeding skipped or failed:', err.message);
+    }
+  }
+
+  @Post('appointment')
+  @ApiOperation({ summary: 'Appointments scheduling workflow step runner' })
+  async runAppointmentWorkflow(@Body() dto: AppointmentWorkflowDto) {
+    const inputStep = dto.step || 'START';
+    const collectedData = dto.collectedData || {};
+    const userInput = (dto.payloadText || dto.messageText || '').trim();
+
+    // Initialize sessionData
+    const sessionData: any = {};
+
+    // 1. Check if patient is registered
+    let patient = await this.prisma.patient.findFirst({ where: { phone: dto.phone } });
+    if (!patient) {
+      const parts = userInput.split(/\s+/);
+      if (parts.length >= 5) {
+        const [firstName, lastName, gender, age, dobStr] = parts;
+        let finalGender = 'OTHER';
+        if (gender.toLowerCase() === 'male' || gender.toLowerCase() === 'm') finalGender = 'MALE';
+        else if (gender.toLowerCase() === 'female' || gender.toLowerCase() === 'f') finalGender = 'FEMALE';
+
+        try {
+          const preferredLanguage = (dto.language || 'en').toUpperCase();
+          const finalLang = ['EN', 'HI', 'TE'].includes(preferredLanguage) ? preferredLanguage : 'EN';
+
+          patient = await this.prisma.patient.create({
+            data: {
+              hospitalId: getTenantId(),
+              firstName,
+              lastName,
+              gender: finalGender as any,
+              age: parseInt(age),
+              dateOfBirth: new Date(dobStr),
+              phone: dto.phone,
+              preferredLanguage: finalLang as any,
+            }
+          });
+          // Patient successfully created! Let's proceed to department selection
+          sessionData.step = 'department_selection';
+        } catch (err) {
+          console.error('Patient creation failed with error:', err);
+          return {
+            nextStep: 'START',
+            collectedData: {},
+            status: 'pending',
+            data: {
+        status: 'registration_required',
+              message: '❌ Invalid format. Please enter details exactly as:\n*FirstName LastName Gender Age YYYY-MM-DD*\n\n(e.g., John Doe Male 30 1996-01-01)',
+            }
+          };
+        }
+      } else {
+        // Return registration instructions to the simulator
+        return {
+          nextStep: 'START',
+          collectedData: {},
+          status: 'pending',
+          data: {
+        status: 'registration_required',
+            message: '📋 *Patient Registration Required*\n\nYou are not registered in our system. Please reply with your details in this format to register:\n\n*FirstName LastName Gender Age YYYY-MM-DD*\n(e.g. John Doe Male 30 1996-01-01)',
+          }
+        };
+      }
+    }
+
+    // 2. Map step and state from the simulator to the backend
+    if (inputStep === 'START') {
+      sessionData.step = 'department_selection';
+      if (collectedData.departmentId) {
+        sessionData.departmentId = collectedData.departmentId;
+        sessionData.step = 'doctor_selection';
+      }
+      if (collectedData.doctorId || collectedData.doctor) {
+        sessionData.doctorId = collectedData.doctorId || collectedData.doctor;
+        sessionData.step = 'date_selection';
+      }
+      if (collectedData.date) {
+        sessionData.date = collectedData.date;
+        sessionData.step = 'slot_selection';
+      }
+    } else if (inputStep === 'SELECT_DOCTOR') {
+      // The simulator sends the selected department ID or doctor ID in userInput
+      const isDepartment = await this.prisma.department.findFirst({
+        where: { id: userInput },
+      });
+
+      if (isDepartment) {
+        // User selected a department, now show doctors in that department
+        sessionData.step = 'doctor_selection';
+        sessionData.departmentId = userInput;
+      } else {
+        // User selected a doctor directly
+        sessionData.step = 'date_selection';
+        sessionData.doctorId = userInput;
+        sessionData.departmentId = collectedData.departmentId || 'default-dept';
+      }
+    } else if (inputStep === 'SELECT_DATE') {
+      const isValidDate = (dStr: string) => /^\d{4}-\d{2}-\d{2}$/.test(dStr) && !isNaN(Date.parse(dStr));
+      
+      sessionData.step = 'slot_selection';
+      sessionData.doctorId = collectedData.doctorId || collectedData.doctor;
+      sessionData.departmentId = collectedData.departmentId;
+      
+      if (isValidDate(userInput)) {
+        sessionData.date = userInput; // Selected date
+      } else {
+        // If the date is invalid (like clicking the header), drop back to date selection step
+        sessionData.step = 'date_selection';
+      }
+    } else if (inputStep === 'SELECT_SLOT') {
+      sessionData.step = 'booking_confirmed';
+      sessionData.doctorId = collectedData.doctorId || collectedData.doctor;
+      sessionData.departmentId = collectedData.departmentId;
+      sessionData.date = collectedData.date;
+      sessionData.slot = userInput; // Selected slot
+    }
+
+    // Call real workflowsService
+    const result = await this.workflowsService.handleAppointmentWorkflow({
+      phone: dto.phone,
+      sessionData,
+    });
+
+    // 3. Map the backend response back to the simulator's format
+    let nextStep: string | null = null;
+    let status: 'success' | 'pending' | 'failed' = 'pending';
+    let data: any = {};
+
+    if (result.step === 'department_selection') {
+      nextStep = 'SELECT_DOCTOR';
+      // Map departments to doctors list format for the simulator
+      data = {
+        status: 'select_doctor',
+        doctors: result.departments?.map(d => `${d.name} (${d.id})`) || [],
+      };
+    } else if (result.step === 'doctor_selection') {
+      nextStep = 'SELECT_DOCTOR';
+      data = {
+        status: 'select_doctor',
+        doctors: result.doctors?.map(d => `${d.name} (${d.id})`) || [],
+      };
+    } else if (result.step === 'date_selection') {
+      nextStep = 'SELECT_DATE';
+      data = {
+        status: 'select_date',
+        doctor: sessionData.doctorId,
+        dates: result.dates || [],
+      };
+    } else if (result.step === 'slot_selection') {
+      nextStep = 'SELECT_SLOT';
+      data = {
+        status: 'select_slot',
+        doctor: sessionData.doctorId,
+        date: sessionData.date,
+        slots: result.slots || [],
+      };
+    } else if (result.step === 'booking_confirmed') {
+      nextStep = null;
+      status = 'success';
+      data = {
+        status: 'confirmed',
+        appointmentId: result.appointment?.appointmentId,
+        doctor: result.appointment?.doctorName,
+        date: result.appointment?.date,
+        time: result.appointment?.time,
+      };
+    } else if (result.step === 'slot_conflict') {
+      // Slot was taken by another patient — show fresh available slots
+      nextStep = 'SELECT_SLOT';
+      status = 'pending';
+      data = {
+        status: 'slot_conflict',
+        message: result.message || 'The selected slot is no longer available. Please choose another slot.',
+        doctor: sessionData.doctorId,
+        date: sessionData.date,
+        slots: result.slots || [],
+      };
+    } else if (result.step === 'booking_failed') {
+      nextStep = null;
+      status = 'failed';
+    }
+
+    // Maintain collectedData session
+    const updatedCollectedData = {
+      ...collectedData,
+      departmentId: sessionData.departmentId || collectedData.departmentId,
+      doctorId: sessionData.doctorId || collectedData.doctorId || collectedData.doctor,
+      doctor: sessionData.doctorId || collectedData.doctorId || collectedData.doctor,
+      date: sessionData.date || collectedData.date,
+      slot: sessionData.slot || collectedData.slot,
+    };
+
+    // If slot conflict occurred, clear the slot so user can re-select
+    if (result.step === 'slot_conflict') {
+      delete updatedCollectedData.slot;
+    }
+
+    return {
+      nextStep,
+      collectedData: updatedCollectedData,
+      status,
+      data,
+    };
+  }
+
+  @Post('doctor-availability')
+  @ApiOperation({ summary: 'Calculate doctor available slots workflow' })
+  async runDoctorAvailabilityWorkflow(@Body() dto: DoctorAvailabilityWorkflowDto) {
+    return this.workflowsService.handleDoctorAvailabilityWorkflow(dto);
+  }
+
+  @Post('report-status')
+  @ApiOperation({ summary: 'Check latest report status workflow' })
+  async runReportStatusWorkflow(@Body() dto: ReportStatusWorkflowDto) {
+    return this.workflowsService.handleReportStatusWorkflow(dto);
+  }
+
+  @Post('knowledge')
+  @ApiOperation({ summary: 'Search KB / FAQ answer match workflow' })
+  async runKnowledgeWorkflow(@Body() dto: KnowledgeWorkflowDto) {
+    return this.workflowsService.handleKnowledgeWorkflow(dto);
+  }
+
+  @Post('escalation')
+  @ApiOperation({ summary: 'Create support ticket / human escalation workflow' })
+  async runEscalationWorkflow(@Body() dto: EscalationWorkflowDto) {
+    return this.workflowsService.handleEscalationWorkflow(dto);
+  }
+
+  @Get('preferences/:phone')
+  @ApiOperation({ summary: 'Get patient language preferences' })
+  async getPreferences(@Param('phone') phone: string) {
+    const patient = await this.prisma.patient.findFirst({
+      where: { phone }
+    });
+    if (!patient) {
+      return { preferredLanguage: null };
+    }
+    return { preferredLanguage: patient.preferredLanguage.toLowerCase() };
+  }
+
+  @Patch('preferences/:phone')
+  @ApiOperation({ summary: 'Update patient language preferences' })
+  async updatePreferences(@Param('phone') phone: string, @Body() body: { preferredLanguage: string }) {
+    const patient = await this.prisma.patient.findFirst({
+      where: { phone }
+    });
+    if (!patient) {
+      return { success: false, error: 'Patient not found' };
+    }
+    const lang = (body.preferredLanguage || '').toUpperCase();
+    if (lang === 'EN' || lang === 'HI' || lang === 'TE') {
+      await this.prisma.patient.update({
+        where: { patientId: patient.patientId },
+        data: {
+        preferredLanguage: lang as Language }
+      });
+      return { success: true };
+    }
+    return { success: false, error: 'Invalid language preference' };
+  }
+}

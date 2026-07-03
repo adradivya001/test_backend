@@ -1,0 +1,591 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPER_ADMIN
+  HOSPITAL_ADMIN
+  RECEPTIONIST
+  DOCTOR
+  LAB_STAFF
+  SUPPORT_AGENT
+}
+
+enum Language {
+  EN
+  HI
+  TE
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum AppointmentStatus {
+  REQUESTED
+  BOOKED
+  CONFIRMED
+  CHECKED_IN
+  IN_CONSULTATION
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+  RESCHEDULED
+}
+
+enum DeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  RETRYING
+  RETRY_LIMIT_REACHED
+  ESCALATED
+}
+
+enum ReportStatus {
+  PENDING
+  PROCESSING
+  READY
+  DELIVERED
+}
+
+enum SupportTicketStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+enum SupportTicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum NotificationType {
+  APPOINTMENT_CONFIRMATION
+  APPOINTMENT_REMINDER
+  REPORT_READY
+  ESCALATION_UPDATE
+  DOCTOR_ALERT
+  DOCTOR_LEAVE_CANCELLATION
+  DOCTOR_LEAVE_RESCHEDULE
+  FOLLOWUP_DUE
+  FOLLOWUP_REMINDER
+  FOLLOWUP_MISSED
+  OTP_VERIFICATION
+}
+
+model Hospital {
+  id                    String   @id @default(uuid())
+  name String @unique
+  whatsappPhoneNumberId String?  @unique
+  whatsappAccessToken   String?
+  whatsappVerifyToken   String?
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+
+  users          User[]
+  patients       Patient[]
+  departments    Department[]
+  doctors        Doctor[]
+  appointments   Appointment[]
+  reports        Report[]
+  supportTickets SupportTicket[]
+  faqs           FAQ[]
+  knowledgeBases KnowledgeBase[]
+  conversations  ConversationMapping[]
+  notifications  NotificationLog[]
+  holidays       HolidayCalendar[]
+  closures       HospitalClosure[]
+  chatMessages   ChatMessage[]
+  whatsappChannels WhatsAppChannel[]
+  notificationTemplates NotificationTemplate[]
+}
+
+model WhatsAppChannel {
+  id              String   @id @default(uuid())
+  tenantId        String
+  hospital        Hospital @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  phoneNumberId   String   @unique
+  phoneNumber     String
+  accessToken     String
+  verifyToken     String
+  webhookSecret   String?
+  status          String   @default("ACTIVE")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model User {
+  id           String   @id @default(uuid())
+  hospitalId String?
+  email String @unique
+  passwordHash String
+  firstName    String
+  lastName     String
+  role         Role
+  phone String? @unique
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  doctor          Doctor?
+  auditLogs       AuditLog[]
+  assignedTickets SupportTicket[] @relation("AssignedAgent")
+  ticketNotes     TicketNote[]
+  uploadedReports Report[]        @relation("UploadedBy")
+
+  
+  
+}
+
+model Patient {
+  patientId                String   @id @default(uuid())
+  hospitalId String?
+  firstName                String
+  lastName                 String
+  gender                   Gender
+  age                      Int
+  dateOfBirth              DateTime
+  phone String
+  email String? @unique
+  address                  String?
+  emergencyContact         String?
+  bloodGroup               String?
+  registrationDate         DateTime @default(now())
+  status                   String   @default("ACTIVE") // ACTIVE / INACTIVE
+  insuranceInformation     String?
+  preferredLanguage        Language @default(EN)
+  communicationPreferences String   @default("WHATSAPP")
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  // Relations
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  appointments  Appointment[]
+  reports       Report[]
+  tickets       SupportTicket[]
+  followUps     PatientFollowUp[]
+  prescriptions Prescription[]
+
+  @@index([phone])
+}
+
+model Department {
+  id           String   @id @default(uuid())
+  hospitalId String?
+  name String
+  description  String?
+  slotDuration Int      @default(30)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  doctors      Doctor[]
+  appointments Appointment[]
+
+  @@unique([hospitalId, name])
+}
+
+model Doctor {
+  doctorId        String   @id @default(uuid())
+  hospitalId String?
+  userId          String?  @unique
+  name String
+  specialization  String
+  departmentId    String
+  experience      Int // years
+  consultationFee Float
+  slotDuration    Int      @default(30)
+  status          String   @default("ACTIVE") // ACTIVE / INACTIVE
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  user                  User?                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  department            Department               @relation(fields: [departmentId], references: [id])
+  schedules             DoctorSchedule[]
+  leaves                DoctorLeave[]
+  appointments          Appointment[]
+  scheduleOverrides     DoctorScheduleOverride[]
+  preferences           DoctorPreferences?
+  notifications         DoctorNotification[]
+  prescriptions         Prescription[]
+  prescriptionTemplates PrescriptionTemplate[]
+
+  @@unique([hospitalId, name])
+}
+
+model DoctorSchedule {
+  id        String   @id @default(uuid())
+  doctorId  String
+  dayOfWeek Int // 0 = Sunday, 1 = Monday, etc.
+  startTime String // e.g. "09:00"
+  endTime   String // e.g. "17:00"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  doctor Doctor @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+
+  @@unique([doctorId, dayOfWeek, startTime, endTime])
+}
+
+model DoctorLeave {
+  id        String   @id @default(uuid())
+  doctorId  String
+  leaveDate DateTime @db.Date
+  reason    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  doctor Doctor @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+
+  @@unique([doctorId, leaveDate])
+}
+
+model Appointment {
+  appointmentId   String            @id @default(uuid())
+  hospitalId String?
+  patientId       String
+  doctorId        String
+  departmentId    String
+  appointmentDate DateTime          @db.Date
+  slotTime        String // e.g. "10:30"
+  status          AppointmentStatus @default(BOOKED)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  // Timestamps & Fields for lifecycle tracking
+  confirmationSentAt    DateTime?
+  checkInAt             DateTime?
+  consultationStartedAt DateTime?
+  completedAt           DateTime?
+  cancelledAt           DateTime?
+  rescheduledAt         DateTime?
+  noShowAt              DateTime?
+  cancellationReason    String?
+  cancelledBy           String?
+  rescheduleReason      String?
+  previousAppointmentId String?
+
+  // Consultation info
+  consultationNotes    String?
+  diagnosis            String?
+  prescriptionUrl      String?
+  followUpDate         DateTime? @db.Date
+  consultationSummary  String?
+  clinicalObservations String?
+  treatmentPlan        String?
+  consultationDuration Int?
+  consultationStatus   String?
+
+  // Relations
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient             Patient                  @relation(fields: [patientId], references: [patientId], onDelete: Cascade)
+  doctor              Doctor                   @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+  department          Department               @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  previousAppointment Appointment?             @relation("RescheduleHistory", fields: [previousAppointmentId], references: [appointmentId], onDelete: SetNull)
+  rescheduledTo       Appointment[]            @relation("RescheduleHistory")
+  reminderLogs        AppointmentReminderLog[]
+  followUp            PatientFollowUp?
+  prescription        Prescription?
+
+  @@unique([doctorId, appointmentDate, slotTime]) // Double booking prevention index
+}
+
+model Report {
+  reportId     String       @id @default(uuid())
+  hospitalId String?
+  patientId    String
+  reportType   String // e.g. "BLOOD_TEST", "X_RAY"
+  reportStatus ReportStatus @default(PENDING)
+  reportUrl    String
+  uploadedBy   String
+  isDeleted    Boolean      @default(false)
+  deletedAt    DateTime?
+  expiresAt    DateTime?
+  version      Int          @default(1)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  // Relations
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient  Patient  @relation(fields: [patientId], references: [patientId], onDelete: Cascade)
+  uploader User     @relation("UploadedBy", fields: [uploadedBy], references: [id])
+}
+
+model FAQ {
+  id             String    @id @default(uuid())
+  hospitalId String?
+  title          String
+  category       String
+  question       String
+  answer         String
+  language       Language  @default(EN)
+  expiryDate     DateTime?
+  reviewStatus   String    @default("APPROVED") // PENDING_REVIEW, APPROVED, EXPIRED
+  lastReviewedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+}
+
+model KnowledgeBase {
+  id             String    @id @default(uuid())
+  hospitalId String?
+  title          String
+  category       String // Hospital Timings, Location, Policies, etc.
+  content        String
+  language       Language  @default(EN)
+  expiryDate     DateTime?
+  reviewStatus   String    @default("APPROVED") // PENDING_REVIEW, APPROVED, EXPIRED
+  lastReviewedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+}
+
+model SupportTicket {
+  ticketId        String                @id @default(uuid())
+  hospitalId String?
+  patientId       String
+  conversationId  String
+  priority        SupportTicketPriority @default(MEDIUM)
+  status          SupportTicketStatus   @default(OPEN)
+  assignedAgentId String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  // Relations
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient       Patient      @relation(fields: [patientId], references: [patientId], onDelete: Cascade)
+  assignedAgent User?        @relation("AssignedAgent", fields: [assignedAgentId], references: [id])
+  notes         TicketNote[]
+}
+
+model TicketNote {
+  id        String   @id @default(uuid())
+  ticketId  String
+  noteText  String
+  authorId  String
+  createdAt DateTime @default(now())
+
+  // Relations
+  ticket SupportTicket @relation(fields: [ticketId], references: [ticketId], onDelete: Cascade)
+  author User          @relation(fields: [authorId], references: [id])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  action     String // e.g. "Appointment Created", "Report Viewed"
+  userId     String?
+  entityType String // e.g. "Appointment", "Report"
+  entityId   String
+  timestamp  DateTime @default(now())
+  details    String? // JSON details of action
+
+  // Relations
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model ConversationMapping {
+  id          String   @id @default(uuid())
+  hospitalId String?
+  phone String @unique
+  workflow    String? // e.g. "appointment"
+  step        String? // e.g. "doctor_selection"
+  sessionData String   @default("{}") // JSON string of session variables
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  
+}
+
+model NotificationLog {
+  id                String           @id @default(uuid())
+  hospitalId String?
+  patientId         String?
+  type              NotificationType
+  payload           String // JSON string of notification content
+  deliveryStatus    DeliveryStatus   @default(PENDING)
+  whatsappMessageId String?          @unique
+  deliveredAt       DateTime?
+  readAt            DateTime?
+  retryCount        Int              @default(0)
+  failureReason     String?
+  lastRetryAt       DateTime?
+  createdAt         DateTime         @default(now())
+
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+}
+
+model AppointmentReminderLog {
+  id            String      @id @default(uuid())
+  appointmentId String
+  reminderType  String // "REMINDER_24H", "REMINDER_2H", "REMINDER_30M"
+  sentAt        DateTime    @default(now())
+  appointment   Appointment @relation(fields: [appointmentId], references: [appointmentId], onDelete: Cascade)
+
+  @@unique([appointmentId, reminderType])
+}
+
+model HolidayCalendar {
+  id         String   @id @default(uuid())
+  hospitalId String?
+  date DateTime @db.Date
+  name String
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@unique([hospitalId, date])
+  @@unique([hospitalId, name])
+}
+
+model HospitalClosure {
+  id         String   @id @default(uuid())
+  hospitalId String?
+  startDate  DateTime @db.Date
+  endDate    DateTime @db.Date
+  reason     String
+
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+}
+
+model DoctorScheduleOverride {
+  id          String   @id @default(uuid())
+  doctorId    String
+  date DateTime @db.Date @unique
+  startTime   String? // Null means unavailable all day
+  endTime     String?
+  isAvailable Boolean  @default(true)
+  doctor      Doctor   @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+
+  @@unique([doctorId, date])
+}
+
+model PatientFollowUp {
+  id            String      @id @default(uuid())
+  appointmentId String      @unique
+  patientId     String
+  followUpDate  DateTime    @db.Date
+  status        String      @default("PENDING") // PENDING, NOTIFIED, COMPLETED, MISSED
+  notifiedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  appointment   Appointment @relation(fields: [appointmentId], references: [appointmentId], onDelete: Cascade)
+  patient       Patient     @relation(fields: [patientId], references: [patientId], onDelete: Cascade)
+}
+
+model DoctorPreferences {
+  id                   String  @id @default(uuid())
+  doctorId             String  @unique
+  receiveNotifications Boolean @default(true)
+  preferredLanguage    String  @default("en")
+  doctor               Doctor  @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+}
+
+model DoctorNotification {
+  id        String   @id @default(uuid())
+  doctorId  String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  doctor    Doctor   @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+}
+
+model Prescription {
+  id            String    @id @default(uuid())
+  appointmentId String    @unique
+  patientId     String
+  doctorId      String
+  notes         String?
+  isDeleted     Boolean   @default(false)
+  deletedAt     DateTime?
+  expiresAt     DateTime?
+  version       Int       @default(1)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  appointment Appointment            @relation(fields: [appointmentId], references: [appointmentId], onDelete: Cascade)
+  patient     Patient                @relation(fields: [patientId], references: [patientId], onDelete: Cascade)
+  doctor      Doctor                 @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+  items       PrescriptionItem[]
+  downloads   PrescriptionDownload[]
+}
+
+model PrescriptionItem {
+  id             String       @id @default(uuid())
+  prescriptionId String
+  medication     String
+  dosage         String
+  instructions   String?
+  duration       String
+  frequency      String
+  refills        Int          @default(0)
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+}
+
+model PrescriptionTemplate {
+  id          String @id @default(uuid())
+  doctorId    String
+  name String @unique
+  medications String // JSON array of medications
+  doctor      Doctor @relation(fields: [doctorId], references: [doctorId], onDelete: Cascade)
+}
+
+model PrescriptionDownload {
+  id             String       @id @default(uuid())
+  prescriptionId String
+  downloadedAt   DateTime     @default(now())
+  ipAddress      String?
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+}
+
+model ChatMessage {
+  id         String   @id @default(uuid())
+  hospitalId String?
+  phone String
+  sender     String
+  message    String
+  timestamp  DateTime @default(now())
+
+  hospital Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([phone])
+  @@index([timestamp])
+}
+
+model NotificationTemplate {
+  id         String   @id @default(uuid())
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  eventType  String   // e.g., "APPT_CONFIRMATION", "APPT_REMINDER", "ESCALATION_ALERT", "PATIENT_WELCOME"
+  language   String   @default("en") // e.g., "en", "hi", "te"
+  content    String   // Template string with placeholders like {{patientName}}, {{doctorName}}
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([hospitalId, eventType, language])
+}
+
