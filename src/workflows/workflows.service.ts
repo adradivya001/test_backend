@@ -203,17 +203,17 @@ export class WorkflowsService {
       if (!dto.dob) {
         return {
           status: 'VERIFICATION_REQUIRED',
-          message: 'For security and privacy, please verify your identity by replying with your Date of Birth (format: YYYY-MM-DD):',
+          message: 'For security and privacy, please verify your identity by replying with your First Name:',
         };
       }
 
-      const cleanInputDob = dto.dob.trim();
-      const patientDobStr = new Date(patient.dateOfBirth).toISOString().split('T')[0];
+      const cleanInputName = dto.dob.trim().toLowerCase();
+      const patientFirstName = patient.firstName.trim().toLowerCase();
       
-      if (cleanInputDob !== patientDobStr) {
+      if (cleanInputName !== patientFirstName) {
         return {
           status: 'VERIFICATION_FAILED',
-          message: 'Verification failed. The Date of Birth provided does not match our records.',
+          message: 'Verification failed. The name provided does not match our records.',
         };
       }
     }

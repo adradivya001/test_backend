@@ -158,8 +158,15 @@ export class WorkflowsController implements OnModuleInit {
       if (parts.length >= 5) {
         const [firstName, lastName, gender, age, dobStr] = parts;
         let finalGender = 'OTHER';
-        if (gender.toLowerCase() === 'male' || gender.toLowerCase() === 'm') finalGender = 'MALE';
-        else if (gender.toLowerCase() === 'female' || gender.toLowerCase() === 'f') finalGender = 'FEMALE';
+        const normalizedGender = gender.toLowerCase().trim();
+        const maleTerms = ['male', 'm', 'पुरुष', 'पुరుషుడు', 'పురుష', 'purush', 'purushudu', 'పు', 'पु', 'p'];
+        const femaleTerms = ['female', 'f', 'महिला', 'स्त्री', 'మహిళ', 'mahila', 'sthree', 'మ', 'म'];
+
+        if (maleTerms.includes(normalizedGender)) {
+          finalGender = 'MALE';
+        } else if (femaleTerms.includes(normalizedGender)) {
+          finalGender = 'FEMALE';
+        }
 
         try {
           const preferredLanguage = (dto.language || 'en').toUpperCase();
@@ -395,10 +402,53 @@ export class WorkflowsController implements OnModuleInit {
       await this.prisma.patient.update({
         where: { patientId: patient.patientId },
         data: {
-        preferredLanguage: lang as Language }
+          preferredLanguage: lang as Language }
       });
       return { success: true };
     }
     return { success: false, error: 'Invalid language preference' };
+  }
+
+  @Get('tickets')
+  @ApiOperation({ summary: 'Get all support tickets (Bypass Auth)' })
+  async getEscalationTickets() {
+    return this.prisma.supportTicket.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: {
+        patient: true,
+      },
+    });
+  }
+
+  @Get('chat-log/:phone')
+  @ApiOperation({ summary: 'Get chat logs (Bypass Auth)' })
+  async getChatLogs(@Param('phone') phone: string) {
+    return this.prisma.chatMessage.findMany({
+      where: { phone },
+      orderBy: { timestamp: 'asc' },
+    });
+  }
+
+  @Post('chat-log')
+  @ApiOperation({ summary: 'Create chat log (Bypass Auth)' })
+  async createChatLog(@Body() body: { phone: string; sender: string; message: string }) {
+    const log = await this.prisma.chatMessage.create({
+      data: {
+        phone: body.phone,
+        sender: body.sender,
+        message: body.message,
+      },
+    });
+    return { success: true, log };
+  }
+
+  @Post('tickets/:ticketId/resolve')
+  @ApiOperation({ summary: 'Resolve support ticket (Bypass Auth)' })
+  async resolveTicket(@Param('ticketId') ticketId: string) {
+    await this.prisma.supportTicket.update({
+      where: { ticketId },
+      data: { status: 'RESOLVED' },
+    });
+    return { success: true };
   }
 }
