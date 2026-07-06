@@ -155,6 +155,80 @@ export class WorkflowsController implements OnModuleInit {
             }
           }
         }
+
+        // Ensure new departments and doctors are seeded
+        const targetDepts = [
+          { name: 'Neurology', desc: 'Brain and nervous system care', docName: 'Dr. Rao', docEmail: 'dr.rao@hospital.com', spec: 'Neurologist' },
+          { name: 'Orthology', desc: 'Bone and joint care', docName: 'Dr. Reddy', docEmail: 'dr.reddy@hospital.com', spec: 'Orthopedist' },
+          { name: 'General Surgeon', desc: 'Surgical services', docName: 'Dr. Verma', docEmail: 'dr.verma@hospital.com', spec: 'Surgeon' },
+          { name: 'Dermatology', desc: 'Skin and hair care', docName: 'Dr. Patel', docEmail: 'dr.patel@hospital.com', spec: 'Dermatologist' },
+        ];
+
+        for (const deptData of targetDepts) {
+          let dept = await this.prisma.department.findFirst({
+            where: { name: deptData.name, hospitalId: hospital.id },
+          });
+          if (!dept) {
+            dept = await this.prisma.department.create({
+              data: {
+                name: deptData.name,
+                description: deptData.desc,
+                hospitalId: hospital.id,
+              },
+            });
+          }
+
+          let docUser = await this.prisma.user.findFirst({
+            where: { email: deptData.docEmail },
+          });
+          if (!docUser) {
+            docUser = await this.prisma.user.create({
+              data: {
+                email: deptData.docEmail,
+                passwordHash: 'mock-hash-123',
+                firstName: deptData.docName.split(' ')[1],
+                lastName: deptData.docName.split(' ')[0],
+                role: 'DOCTOR',
+                hospitalId: hospital.id,
+              },
+            });
+          }
+
+          let doc = await this.prisma.doctor.findFirst({
+            where: { name: deptData.docName, hospitalId: hospital.id },
+          });
+          if (!doc) {
+            doc = await this.prisma.doctor.create({
+              data: {
+                name: deptData.docName,
+                specialization: deptData.spec,
+                departmentId: dept.id,
+                experience: 8,
+                consultationFee: 120,
+                userId: docUser.id,
+                status: 'ACTIVE',
+                hospitalId: hospital.id,
+              },
+            });
+          }
+
+          // Ensure doctor has schedules for all 7 days
+          for (let day = 0; day < 7; day++) {
+            const schedExists = await this.prisma.doctorSchedule.findFirst({
+              where: { doctorId: doc.doctorId, dayOfWeek: day },
+            });
+            if (!schedExists) {
+              await this.prisma.doctorSchedule.create({
+                data: {
+                  doctorId: doc.doctorId,
+                  dayOfWeek: day,
+                  startTime: '09:00',
+                  endTime: '17:00',
+                },
+              });
+            }
+          }
+        }
       }
     } catch (err) {
       console.warn('Auto-seeding skipped or failed:', err.message);
