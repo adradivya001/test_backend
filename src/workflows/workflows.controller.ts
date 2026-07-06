@@ -21,7 +21,7 @@ export class WorkflowsController implements OnModuleInit {
   async onModuleInit() {
     try {
       // 1. Ensure Sandbox Hospital exists
-      let hospital = await this.prisma.hospital.findFirst({ where: { name: 'Sandbox Hospital' } });
+      let hospital = await this.prisma.hospital.findFirst({ where: { id: 'mock_hospital_id' } });
       if (!hospital) {
         hospital = await this.prisma.hospital.create({
           data: {
