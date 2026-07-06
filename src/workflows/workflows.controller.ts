@@ -135,6 +135,26 @@ export class WorkflowsController implements OnModuleInit {
           where: { hospitalId: null },
           data: { hospitalId: hospital.id }
         });
+
+        // Ensure Dr. Kumar has schedules for all 7 days of the week
+        const kumar = await this.prisma.doctor.findFirst({ where: { name: 'Dr. Kumar' } });
+        if (kumar) {
+          for (let day = 0; day < 7; day++) {
+            const exists = await this.prisma.doctorSchedule.findFirst({
+              where: { doctorId: kumar.doctorId, dayOfWeek: day }
+            });
+            if (!exists) {
+              await this.prisma.doctorSchedule.create({
+                data: {
+                  doctorId: kumar.doctorId,
+                  dayOfWeek: day,
+                  startTime: '09:00',
+                  endTime: '17:00',
+                }
+              });
+            }
+          }
+        }
       }
     } catch (err) {
       console.warn('Auto-seeding skipped or failed:', err.message);
@@ -215,6 +235,9 @@ export class WorkflowsController implements OnModuleInit {
     // 2. Map step and state from the simulator to the backend
     if (inputStep === 'START') {
       sessionData.step = 'department_selection';
+      if (collectedData.patientId) {
+        sessionData.patientId = collectedData.patientId;
+      }
       if (collectedData.departmentId) {
         sessionData.departmentId = collectedData.departmentId;
         sessionData.step = 'doctor_selection';
@@ -227,6 +250,9 @@ export class WorkflowsController implements OnModuleInit {
         sessionData.date = collectedData.date;
         sessionData.step = 'slot_selection';
       }
+    } else if (inputStep === 'SELECT_PROFILE') {
+      sessionData.patientId = userInput;
+      sessionData.step = 'department_selection';
     } else if (inputStep === 'SELECT_DOCTOR') {
       // The simulator sends the selected department ID or doctor ID in userInput
       const isDepartment = await this.prisma.department.findFirst({
@@ -275,7 +301,14 @@ export class WorkflowsController implements OnModuleInit {
     let status: 'success' | 'pending' | 'failed' = 'pending';
     let data: any = {};
 
-    if (result.step === 'department_selection') {
+    if (result.step === 'profile_selection') {
+      nextStep = 'SELECT_PROFILE';
+      data = {
+        status: 'select_doctor',
+        doctors: result.profiles?.map(p => `${p.name} (${p.id})`) || [],
+        message: 'Multiple profiles found under this number. Please select the patient profile:',
+      };
+    } else if (result.step === 'department_selection') {
       nextStep = 'SELECT_DOCTOR';
       // Map departments to doctors list format for the simulator
       data = {
@@ -332,6 +365,7 @@ export class WorkflowsController implements OnModuleInit {
     // Maintain collectedData session
     const updatedCollectedData = {
       ...collectedData,
+      patientId: sessionData.patientId || collectedData.patientId,
       departmentId: sessionData.departmentId || collectedData.departmentId,
       doctorId: sessionData.doctorId || collectedData.doctorId || collectedData.doctor,
       doctor: sessionData.doctorId || collectedData.doctorId || collectedData.doctor,
